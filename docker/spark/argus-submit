@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# spark-submit wrapper: pins the driver host to this container's IP so executors
+# can call back even from throwaway containers (e.g. ones Airflow launches).
+set -euo pipefail
+if [ $# -lt 1 ]; then
+  echo "usage: argus-submit <job.py> [job args...]" >&2
+  exit 2
+fi
+exec spark-submit \
+  --conf "spark.driver.host=$(hostname -i | awk '{print $1}')" \
+  --conf "spark.driver.bindAddress=0.0.0.0" \
+  ${ARGUS_SPARK_OPTS:-} \
+  "$@"
