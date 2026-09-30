@@ -1,0 +1,37 @@
+# datasets (multi-GB) - regenerate with `make sample` / `make download`
+data/raw/*
+data/sample/*
+!data/raw/.gitkeep
+!data/sample/.gitkeep
+
+# generated outputs
+results/*
+!results/.gitkeep
+mapreduce/target/
+*.class
+*.jar
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# spark / hadoop / mlflow local artifacts
+spark-warehouse/
+metastore_db/
+derby.log
+mlruns/
+
+# editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# secrets
+.env
+kaggle.json
