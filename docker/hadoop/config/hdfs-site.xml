@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<configuration>
+  <!-- 3 DataNodes, replication 2: killing one DataNode triggers visible re-replication. -->
+  <property>
+    <name>dfs.replication</name>
+    <value>2</value>
+  </property>
+  <property>
+    <name>dfs.namenode.name.dir</name>
+    <value>/hadoop/dfs/name</value>
+  </property>
+  <property>
+    <name>dfs.datanode.data.dir</name>
+    <value>/hadoop/dfs/data</value>
+  </property>
+  <property>
+    <name>dfs.blocksize</name>
+    <value>64m</value>
+  </property>
+  <!-- Lab cluster: every container user (root, spark, hive, airflow) can read/write. -->
+  <property>
+    <name>dfs.permissions.enabled</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>dfs.namenode.datanode.registration.ip-hostname-check</name>
+    <value>false</value>
+  </property>
+  <!-- Dead DataNode detected in ~60s (2*recheck + 10*heartbeat) so the failover demo is watchable. -->
+  <property>
+    <name>dfs.heartbeat.interval</name>
+    <value>3</value>
+  </property>
+  <property>
+    <name>dfs.namenode.heartbeat.recheck-interval</name>
+    <value>15000</value>
+  </property>
+  <property>
+    <name>dfs.namenode.http-address</name>
+    <value>0.0.0.0:9870</value>
+  </property>
+</configuration>
