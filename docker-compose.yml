@@ -1,0 +1,279 @@
+name: argus
+
+# Profiles keep RAM in check - start only what a step needs (see Makefile):
+#   (none)   HDFS (1 NameNode + 3 DataNodes) + YARN (RM, NM) + JobHistory
+#   spark    Spark master/worker + MLflow
+#   mongo    3-node MongoDB replica set
+#   kafka    Kafka (KRaft) + Kafka UI
+#   hive     HiveServer2
+#   app      Streamlit dashboard
+#   airflow  Airflow + docker socket proxy
+
+x-hadoop: &hadoop
+  image: argus/hadoop:3.4.1
+  build: ./docker/hadoop
+  restart: unless-stopped
+  volumes:
+    - ./:/opt/argus:ro
+    - ./data:/data
+
+x-spark: &spark
+  image: argus/spark:3.5.6
+  build: ./docker/spark
+  restart: unless-stopped
+  profiles: ["spark"]
+  environment: &spark-env
+    ARGUS_HDFS: hdfs://namenode:8020
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
+    MLFLOW_HTTP_REQUEST_TIMEOUT: "10"
+    PYTHONPATH: /opt/argus/src
+  volumes:
+    - ./:/opt/argus:ro
+    - ./data:/data
+
+x-mongo: &mongo
+  image: mongo:8.0
+  restart: unless-stopped
+  profiles: ["mongo"]
+  command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+  healthcheck:
+    test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+    interval: 5s
+    timeout: 5s
+    retries: 20
+
+x-py: &py
+  image: argus/py:latest
+  build: ./docker/py
+  environment:
+    ARGUS_KAFKA: kafka:9092
+    ARGUS_MONGO_URI: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0
+    ARGUS_NAMENODE_HTTP: http://namenode:9870
+  volumes:
+    - ./:/opt/argus:ro
+    - ./data:/data
+    - ./results:/opt/argus/results
+
+services:
+  # ------------------------------------------------------------------ HDFS + YARN
+  namenode:
+    <<: *hadoop
+    hostname: namenode
+    command: ["namenode"]
+    ports: ["9870:9870"]
+    volumes:
+      - ./:/opt/argus:ro
+      - ./data:/data
+      - namenode:/hadoop/dfs/name
+    healthcheck:
+      test: ["CMD", "bash", "-c", "hdfs dfsadmin -safemode get | grep -q OFF"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  datanode1: &datanode
+    <<: *hadoop
+    hostname: datanode1
+    command: ["datanode"]
+    environment:
+      HDFS_DATANODE_OPTS: -Xmx512m
+    volumes:
+      - datanode1:/hadoop/dfs/data
+  datanode2:
+    <<: *datanode
+    hostname: datanode2
+    volumes:
+      - datanode2:/hadoop/dfs/data
+  datanode3:
+    <<: *datanode
+    hostname: datanode3
+    volumes:
+      - datanode3:/hadoop/dfs/data
+
+  resourcemanager:
+    <<: *hadoop
+    hostname: resourcemanager
+    command: ["resourcemanager"]
+    ports: ["8088:8088"]
+
+  nodemanager:
+    <<: *hadoop
+    hostname: nodemanager
+    command: ["nodemanager"]
+    ports: ["8042:8042"]
+
+  historyserver:
+    <<: *hadoop
+    hostname: historyserver
+    command: ["historyserver"]
+    ports: ["19888:19888"]
+
+  # ------------------------------------------------------------------ Spark + MLflow
+  spark-master:
+    <<: *spark
+    hostname: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    ports: ["8090:8080", "4040:4040"]
+
+  spark-worker:
+    <<: *spark
+    hostname: spark-worker
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      <<: *spark-env
+      SPARK_WORKER_CORES: "4"
+      SPARK_WORKER_MEMORY: 4g
+    ports: ["8091:8081"]
+    depends_on: [spark-master]
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.22.1
+    restart: unless-stopped
+    profiles: ["spark"]
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --serve-artifacts --artifacts-destination /mlflow/artifacts
+    ports: ["5500:5000"]
+    volumes:
+      - mlflow:/mlflow
+
+  # ------------------------------------------------------------------ MongoDB replica set
+  mongo1:
+    <<: *mongo
+    hostname: mongo1
+    ports: ["27018:27017"]
+    volumes: [mongo1:/data/db]
+  mongo2:
+    <<: *mongo
+    hostname: mongo2
+    volumes: [mongo2:/data/db]
+  mongo3:
+    <<: *mongo
+    hostname: mongo3
+    volumes: [mongo3:/data/db]
+  mongo-init:
+    image: mongo:8.0
+    profiles: ["mongo"]
+    restart: "no"
+    depends_on:
+      mongo1: { condition: service_healthy }
+      mongo2: { condition: service_healthy }
+      mongo3: { condition: service_healthy }
+    volumes: ["./mongodb:/scripts:ro"]
+    command: ["mongosh", "--host", "mongo1", "--quiet", "/scripts/init-replica.js"]
+
+  # ------------------------------------------------------------------ Kafka (KRaft, no ZooKeeper)
+  kafka:
+    image: apache/kafka:3.9.1
+    hostname: kafka
+    restart: unless-stopped
+    profiles: ["kafka"]
+    ports: ["29092:29092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+    volumes: [kafka:/var/lib/kafka/data]
+
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.3.0
+    restart: unless-stopped
+    profiles: ["kafka"]
+    ports: ["8085:8080"]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: argus
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on: [kafka]
+
+  producer:
+    <<: *py
+    profiles: ["kafka"]
+    restart: "no"
+    command: ["python", "streaming/producer.py", "--rate", "20", "--live-weather"]
+    depends_on: [kafka]
+
+  # ------------------------------------------------------------------ Hive
+  hiveserver2:
+    image: apache/hive:4.0.1
+    hostname: hiveserver2
+    restart: unless-stopped
+    profiles: ["hive"]
+    environment:
+      SERVICE_NAME: hiveserver2
+      SERVICE_OPTS: -Xmx1g
+      IS_RESUME: "true"
+    ports: ["10000:10000", "10002:10002"]
+    volumes:
+      - ./hive:/opt/argus-hive:ro
+      - hive:/opt/hive/data/warehouse
+
+  # ------------------------------------------------------------------ Dashboard
+  dashboard:
+    <<: *py
+    profiles: ["app"]
+    restart: unless-stopped
+    command: ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0",
+              "--server.headless=true", "--browser.gatherUsageStats=false"]
+    ports: ["8501:8501"]
+
+  # ------------------------------------------------------------------ Airflow
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    profiles: ["airflow"]
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      POST: 1
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+
+  airflow:
+    image: apache/airflow:2.11.0-python3.11
+    restart: unless-stopped
+    profiles: ["airflow"]
+    command: >
+      bash -c "airflow db migrate &&
+      (airflow users create -u admin -p admin -f Argus -l Admin -r Admin -e admin@argus.local || true) &&
+      exec airflow standalone"
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "False"
+      ARGUS_HOME: ${PWD}
+      DOCKER_URL: tcp://docker-proxy:2375
+    ports: ["8082:8080"]
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow:/opt/airflow
+    depends_on: [docker-proxy]
+
+networks:
+  default:
+    name: argus-net
+
+volumes:
+  namenode:
+  datanode1:
+  datanode2:
+  datanode3:
+  mlflow:
+  mongo1:
+  mongo2:
+  mongo3:
+  kafka:
+  hive:
+  airflow:
