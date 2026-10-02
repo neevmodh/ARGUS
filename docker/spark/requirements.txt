@@ -4,4 +4,4 @@ pandas==2.2.3
 pyarrow==17.0.0
 pymongo==4.10.1
 mlflow-skinny==2.22.1
-requests==2.32.3
+requests==2.33.0
