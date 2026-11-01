@@ -1,5 +1,5 @@
 confluent-kafka==2.6.1
-pymongo==4.10.1
+pymongo==4.18.3
 requests==2.32.3
 tzdata==2025.2
 pandas==2.2.3
